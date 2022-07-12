@@ -27,6 +27,8 @@
   "plugins": [
     "react",
     "react-hooks",
+    "testing-library",
+    "jest-dom",
     "@typescript-eslint",
     "prettier"
   ],

@@ -1,219 +1,390 @@
+import { screen, render, fireEvent } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { ChakraProvider } from '@chakra-ui/react';
+import { QueryClient, QueryClientProvider } from 'react-query';
+import AxiosMock from 'axios-mock-adapter';
 
+import Home from '../../pages/index';
+import { theme } from '../../styles/theme';
+import { api } from '../../services/api';
 
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import { GetStaticPropsContext } from 'next';
-import { ParsedUrlQuery } from 'querystring';
-import { RouterContext } from 'next/dist/next-server/lib/router-context';
+const apiMock = new AxiosMock(api);
 
-import { getPrismicClient } from '../../services/prismic';
-import App, { getStaticProps } from '../../pages';
+let queryClient: QueryClient;
+let wrapper;
 
-interface Post {
-  uid?: string;
-  first_publication_date: string | null;
-  data: {
-    title: string;
-    subtitle: string;
-    author: string;
-  };
-}
-
-interface PostPagination {
-  next_page: string;
-  results: Post[];
-}
-
-interface HomeProps {
-  postsPagination: PostPagination;
-}
-
-interface GetStaticPropsResult {
-  props: HomeProps;
-}
-
-const mockedGetByTypeReturn = {
-  next_page: 'link',
-  results: [
-    {
-      uid: 'como-utilizar-hooks',
-      first_publication_date: '2021-03-15T19:25:28+0000',
-      data: {
-        title: 'Como utilizar Hooks',
-        subtitle: 'Pensando em sincronização em vez de ciclos de vida',
-        author: 'Joseph Oliveira',
-      },
-    },
-    {
-      uid: 'criando-um-app-cra-do-zero',
-      first_publication_date: '2021-03-25T19:27:35+0000',
-      data: {
-        title: 'Criando um app CRA do zero',
-        subtitle:
-          'Tudo sobre como criar a sua primeira aplicação utilizando Create React App',
-        author: 'Danilo Vieira',
-      },
-    },
-  ],
-};
-
-jest.mock('@prismicio/client');
-jest.mock('../../services/prismic');
-
-const mockedPrismic = getPrismicClient as jest.Mock;
-const mockedFetch = jest.spyOn(window, 'fetch') as jest.Mock;
-const mockedPush = jest.fn();
-let RouterWrapper;
-
-describe('Home', () => {
+describe('Home page', () => {
   beforeAll(() => {
-    mockedPush.mockImplementation(() => Promise.resolve());
-    const MockedRouterContext = RouterContext as React.Context<unknown>;
-    RouterWrapper = ({ children }): JSX.Element => {
-      return (
-        <MockedRouterContext.Provider
-          value={{
-            push: mockedPush,
-          }}
-        >
+    Object.defineProperty(window, 'matchMedia', {
+      writable: true,
+      value: jest.fn().mockImplementation(query => ({
+        matches: false,
+        media: query,
+        onchange: null,
+        addListener: jest.fn(),
+        removeListener: jest.fn(),
+        addEventListener: jest.fn(),
+        removeEventListener: jest.fn(),
+        dispatchEvent: jest.fn(),
+      })),
+    });
+
+    const LOAD_FAILURE_SRC = 'LOAD_FAILURE_SRC';
+    const LOAD_SUCCESS_SRC = 'LOAD_SUCCESS_SRC';
+    Object.defineProperty(global.Image.prototype, 'src', {
+      set(src) {
+        if (src === LOAD_FAILURE_SRC) {
+          setTimeout(() => {
+            if (this.onerror) {
+              this.onerror(new Error('mocked error'));
+            }
+          });
+        } else if (src === LOAD_SUCCESS_SRC) {
+          setTimeout(() => {
+            if (this.onload) {
+              this.onload();
+            }
+          });
+        }
+      },
+    });
+
+    function noOp(): string {
+      return 'noOp';
+    }
+    Object.defineProperty(window.URL, 'createObjectURL', { value: noOp });
+  });
+
+  beforeEach(() => {
+    apiMock.reset();
+
+    queryClient = new QueryClient();
+
+    wrapper = ({ children }): JSX.Element => (
+      <ChakraProvider resetCSS theme={theme}>
+        <QueryClientProvider client={queryClient}>
           {children}
-        </MockedRouterContext.Provider>
-      );
-    };
+        </QueryClientProvider>
+      </ChakraProvider>
+    );
+  });
 
-    mockedPrismic.mockReturnValue({
-      getByType: () => {
-        return Promise.resolve(mockedGetByTypeReturn);
-      },
+  it('should be able to render loading', async () => {
+    apiMock.onGet('/api/images').reply(200);
+
+    render(<Home />, { wrapper });
+
+    expect(
+      screen.getByRole('heading', { name: 'Carregando aplicação...' })
+    ).toBeInTheDocument();
+    expect(screen.getByRole('progressbar')).toBeInTheDocument();
+  });
+
+  it('should be able to render error', async () => {
+    const mockedConsoleError = jest.fn();
+    Object.defineProperty(console, 'error', {
+      value: mockedConsoleError,
     });
 
-    mockedFetch.mockImplementation(() => {
-      return Promise.resolve({
-        json: () =>
-          Promise.resolve({
-            next_page: null,
-            results: [
-              {
-                uid: 'criando-um-app-cra-do-zero',
-                first_publication_date: '2021-03-25T19:27:35+0000',
-                data: {
-                  title: 'Criando um app CRA do zero',
-                  subtitle:
-                    'Tudo sobre como criar a sua primeira aplicação utilizando Create React App',
-                  author: 'Danilo Vieira',
-                },
-              },
-            ],
-          }),
-      });
-    });
+    apiMock.onGet('/api/images').reply(400);
+    queryClient.setQueryDefaults('images', { retry: 0 });
+
+    render(<Home />, { wrapper });
+
+    expect(
+      await screen.findByText('Infelizmente ocorreu um erro =(')
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Clique aqui para tentar novamente' })
+    ).toBeInTheDocument();
   });
 
-  it('should be able to return prismic posts documents using getStaticProps', async () => {
-    const postsPaginationReturn = mockedGetByTypeReturn;
-
-    const getStaticPropsContext: GetStaticPropsContext<ParsedUrlQuery> = {};
-
-    const response = (await getStaticProps(
-      getStaticPropsContext
-    )) as GetStaticPropsResult;
-
-    expect(response.props.postsPagination.next_page).toEqual(
-      postsPaginationReturn.next_page
-    );
-    expect(response.props.postsPagination.results).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining(postsPaginationReturn.results[0]),
-        expect.objectContaining(postsPaginationReturn.results[1]),
-      ])
-    );
-  });
-
-  it('should be able to render posts documents info', () => {
-    const postsPagination = mockedGetByTypeReturn;
-
-    render(<App postsPagination={postsPagination} />);
-
-    screen.getByText('Como utilizar Hooks');
-    screen.getByText('Pensando em sincronização em vez de ciclos de vida');
-    screen.getByText('15 mar 2021');
-    screen.getByText('Joseph Oliveira');
-
-    screen.getByText('Criando um app CRA do zero');
-    screen.getByText(
-      'Tudo sobre como criar a sua primeira aplicação utilizando Create React App'
-    );
-    screen.getByText('15 mar 2021');
-    screen.getByText('Danilo Vieira');
-  });
-
-  it('should be able to navigate to post page after a click', () => {
-    const postsPagination = mockedGetByTypeReturn;
-
-    render(<App postsPagination={postsPagination} />, {
-      wrapper: RouterWrapper,
-    });
-
-    const firstPostTitle = screen.getByText('Como utilizar Hooks');
-    const secondPostTitle = screen.getByText('Criando um app CRA do zero');
-
-    fireEvent.click(firstPostTitle);
-    fireEvent.click(secondPostTitle);
-
-    expect(mockedPush).toHaveBeenNthCalledWith(
-      1,
-      '/post/como-utilizar-hooks',
-      expect.anything(),
-      expect.anything()
-    );
-    expect(mockedPush).toHaveBeenNthCalledWith(
-      2,
-      '/post/criando-um-app-cra-do-zero',
-      expect.anything(),
-      expect.anything()
-    );
-  });
-
-  it('should be able to load more posts if available', async () => {
-    const postsPagination = { ...mockedGetByTypeReturn };
-    postsPagination.results = [
-      {
-        uid: 'como-utilizar-hooks',
-        first_publication_date: '2021-03-15T19:25:28+0000',
-        data: {
-          title: 'Como utilizar Hooks',
-          subtitle: 'Pensando em sincronização em vez de ciclos de vida',
-          author: 'Joseph Oliveira',
+  it('should be able to render images list', async () => {
+    apiMock.onGet('/api/images').reply(200, {
+      after: null,
+      data: [
+        {
+          id: '1617555636970000',
+          ts: 1617555636970000,
+          title: 'Doge',
+          description: 'The best doge',
+          url: 'LOAD_SUCCESS_SRC',
         },
-      },
-    ];
+        {
+          id: '1617556158800000',
+          ts: 1617556158800000,
+          title: 'Danilo',
+          description: 'The best friend',
+          url: 'LOAD_SUCCESS_SRC',
+        },
+      ],
+    });
 
-    render(<App postsPagination={postsPagination} />);
+    render(<Home />, { wrapper });
 
-    screen.getByText('Como utilizar Hooks');
-    const loadMorePostsButton = screen.getByText('Carregar mais posts');
+    expect(await screen.findByText('The best doge')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Doge' })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Doge' })).toBeInTheDocument();
 
-    fireEvent.click(loadMorePostsButton);
-
-    await waitFor(
-      () => {
-        expect(mockedFetch).toHaveBeenCalled();
-      },
-      { timeout: 200 }
-    );
-
-    screen.getByText('Criando um app CRA do zero');
+    expect(await screen.findByText('The best friend')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Danilo' })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Danilo' })).toBeInTheDocument();
   });
 
-  it('should not be able to load more posts if not available', async () => {
-    const postsPagination = mockedGetByTypeReturn;
-    postsPagination.next_page = null;
+  it('should be able to view an image', async () => {
+    apiMock.onGet('/api/images').reply(200, {
+      after: null,
+      data: [
+        {
+          id: '1617555636970000',
+          ts: 1617555636970000,
+          title: 'Doge',
+          description: 'The best doge',
+          url: 'LOAD_SUCCESS_SRC',
+        },
+      ],
+    });
 
-    render(<App postsPagination={postsPagination} />);
+    render(<Home />, { wrapper });
 
-    screen.getByText('Como utilizar Hooks');
-    screen.getByText('Criando um app CRA do zero');
-    const loadMorePostsButton = screen.queryByText('Carregar mais posts');
+    expect(await screen.findByText('The best doge')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Doge' })).toBeInTheDocument();
+    const dogeImg = screen.getByRole('img', { name: 'Doge' });
+    expect(dogeImg).toBeInTheDocument();
 
-    expect(loadMorePostsButton).not.toBeInTheDocument();
+    fireEvent.click(dogeImg);
+
+    expect(await screen.findByText('Abrir original')).toBeInTheDocument();
+    expect(screen.getByText('Abrir original')).toHaveAttribute(
+      'href',
+      'LOAD_SUCCESS_SRC'
+    );
+  });
+
+  it('should be able to load more images', async () => {
+    apiMock.onGet('/api/images').replyOnce(200, {
+      after: 'next-cursor',
+      data: [
+        {
+          id: '1617555636970000',
+          ts: 1617555636970000,
+          title: 'Doge',
+          description: 'The best doge',
+          url: 'LOAD_SUCCESS_SRC',
+        },
+        {
+          id: '1617556158800000',
+          ts: 1617556158800000,
+          title: 'Danilo',
+          description: 'The best friend',
+          url: 'LOAD_SUCCESS_SRC',
+        },
+      ],
+    });
+    apiMock.onGet('/api/images').replyOnce(200, {
+      after: null,
+      data: [
+        {
+          id: '1617555636990000',
+          ts: 1617555636990000,
+          title: 'Vini',
+          description: 'The ??',
+          url: 'LOAD_SUCCESS_SRC',
+        },
+      ],
+    });
+
+    render(<Home />, { wrapper });
+
+    expect(await screen.findByText('The best doge')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Doge' })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Doge' })).toBeInTheDocument();
+
+    expect(await screen.findByText('The best friend')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Danilo' })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Danilo' })).toBeInTheDocument();
+
+    const loadMoreButton = await screen.findByRole('button', {
+      name: 'Carregar mais',
+    });
+    fireEvent.click(loadMoreButton);
+
+    expect(await screen.findByText('The best doge')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Doge' })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Doge' })).toBeInTheDocument();
+
+    expect(await screen.findByText('The best friend')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Danilo' })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Danilo' })).toBeInTheDocument();
+
+    expect(await screen.findByText('The ??')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Vini' })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Vini' })).toBeInTheDocument();
+
+    expect(loadMoreButton).not.toBeInTheDocument();
+  });
+
+  it('should be able to add a new image', async () => {
+    apiMock.onGet('/api/images').replyOnce(200, {
+      after: 'next-cursor',
+      data: [
+        {
+          id: '1617555636970000',
+          ts: 1617555636970000,
+          title: 'Doge',
+          description: 'The best doge',
+          url: 'LOAD_SUCCESS_SRC',
+        },
+        {
+          id: '1617556158800000',
+          ts: 1617556158800000,
+          title: 'Danilo',
+          description: 'The best friend',
+          url: 'LOAD_SUCCESS_SRC',
+        },
+      ],
+    });
+    apiMock.onGet('/api/images').replyOnce(200, {
+      after: null,
+      data: [
+        {
+          id: '1617555636990000',
+          ts: 1617555636990000,
+          title: 'Vini',
+          description: 'The ??',
+          url: 'LOAD_SUCCESS_SRC',
+        },
+      ],
+    });
+    apiMock.onPost('https://api.imgbb.com/1/upload').replyOnce(200, {
+      data: {
+        url: 'LOAD_SUCCESS_SRC',
+      },
+    });
+
+    const file = new File(['image'], 'image.png', { type: 'image/png' });
+
+    render(<Home />, { wrapper });
+
+    expect(await screen.findByText('The best doge')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Doge' })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Doge' })).toBeInTheDocument();
+
+    expect(await screen.findByText('The best friend')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Danilo' })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Danilo' })).toBeInTheDocument();
+
+    const loadMoreButton = await screen.findByRole('button', {
+      name: 'Carregar mais',
+    });
+    fireEvent.click(loadMoreButton);
+
+    expect(await screen.findByText('The best doge')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Doge' })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Doge' })).toBeInTheDocument();
+
+    expect(await screen.findByText('The best friend')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Danilo' })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Danilo' })).toBeInTheDocument();
+
+    expect(await screen.findByText('The ??')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Vini' })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Vini' })).toBeInTheDocument();
+
+    expect(loadMoreButton).not.toBeInTheDocument();
+
+    const addNewImageButton = screen.getByText('Adicionar imagem');
+    fireEvent.click(addNewImageButton);
+
+    const fileInput = screen.getByTestId('image') as HTMLInputElement;
+    const nameInput = screen.getByRole('textbox', {
+      name: 'title',
+    }) as HTMLInputElement;
+    const descriptionInput = screen.getByRole('textbox', {
+      name: 'description',
+    }) as HTMLInputElement;
+
+    userEvent.upload(fileInput, file);
+    fireEvent.change(nameInput, {
+      target: {
+        value: 'Rocket League',
+      },
+    });
+    fireEvent.change(descriptionInput, {
+      target: {
+        value: 'Flying forever',
+      },
+    });
+
+    await screen.findByRole('img', { name: 'Uploaded photo' });
+    expect(fileInput.files[0]).toStrictEqual(file);
+    expect(nameInput).toHaveValue('Rocket League');
+    expect(descriptionInput).toHaveValue('Flying forever');
+
+    const submitButton = screen.getByRole('button', { name: 'Enviar' });
+
+    apiMock.onPost('/api/images').replyOnce(200);
+    apiMock.onGet('/api/images').replyOnce(200, {
+      after: 'next-cursor',
+      data: [
+        {
+          id: '1617555636970000',
+          ts: 1617555636970000,
+          title: 'Doge',
+          description: 'The best doge',
+          url: 'LOAD_SUCCESS_SRC',
+        },
+        {
+          id: '1617556158800000',
+          ts: 1617556158800000,
+          title: 'Danilo',
+          description: 'The best friend',
+          url: 'LOAD_SUCCESS_SRC',
+        },
+      ],
+    });
+    apiMock.onGet('/api/images').replyOnce(200, {
+      after: null,
+      data: [
+        {
+          id: '1617555636990000',
+          ts: 1617555636990000,
+          title: 'Vini',
+          description: 'The ??',
+          url: 'LOAD_SUCCESS_SRC',
+        },
+        {
+          id: '1617555639990000',
+          ts: 1617555639990000,
+          title: 'Rocket League',
+          description: 'Flying forever',
+          url: 'LOAD_SUCCESS_SRC',
+        },
+      ],
+    });
+
+    fireEvent.click(submitButton);
+
+    expect(await screen.findByText('The best doge')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Doge' })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Doge' })).toBeInTheDocument();
+
+    expect(await screen.findByText('The best friend')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Danilo' })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Danilo' })).toBeInTheDocument();
+
+    expect(await screen.findByText('The ??')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Vini' })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Vini' })).toBeInTheDocument();
+
+    expect(await screen.findByText('Flying forever')).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: 'Rocket League' })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('img', { name: 'Rocket League' })
+    ).toBeInTheDocument();
+
+    expect(loadMoreButton).not.toBeInTheDocument();
   });
 });
